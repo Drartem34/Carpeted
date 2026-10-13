@@ -1,0 +1,18 @@
+# ~/.config/carpeted/config  (all keys optional)
+
+height = 0.42            # share of the screen height the floor takes
+layer = top              # top | overlay
+# output = DP-1          # default: the focused monitor
+
+rug_width = 900
+rug_height = 300
+rug_cell = 15            # physics grid spacing in px (smaller = finer, more CPU)
+iterations = 10          # constraint iterations (stiffer, more CPU)
+lift_height = 60         # how high a grabbed point is lifted
+focal = 1800             # perspective (smaller = stronger)
+unroll_time = 0.9
+roll_time = 0.55
+shade = true             # dark see-through band behind the floor
+
+watch = downloads, screenshots     # or extra folders: ~/Inbox, /tmp/drop
+recent_limit = 30                  # how many automatic cards may lie around
