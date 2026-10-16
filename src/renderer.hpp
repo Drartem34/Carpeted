@@ -16,6 +16,7 @@ struct RenderParams {
     const Item* selected = nullptr;
     const Item* carried = nullptr;   // drawn above the rug, lifted
     const Item* hidden = nullptr;    // being dragged out: not drawn
+    bool animating = false;          // rolling: cards wait until their spot is flat
 };
 
 class Renderer {
@@ -31,7 +32,8 @@ public:
     std::vector<uint8_t> read_pixels(int w, int h);   // RGBA, top row first
 
 private:
-    GLuint quad_prog_ = 0, rug_prog_ = 0, shadow_prog_ = 0;
+    GLuint quad_prog_ = 0, rug_prog_ = 0, shadow_prog_ = 0, card_prog_ = 0;
+    GLuint card_vao_ = 0, card_vbo_ = 0, card_ibo_ = 0;
     GLuint quad_vao_ = 0, quad_vbo_ = 0;
     GLuint rug_vao_ = 0, rug_vbo_ = 0, uv_vbo_ = 0, ibo_ = 0;
     GLuint rug_tex_ = 0;
@@ -39,6 +41,8 @@ private:
     std::vector<float> scratch_;
     void build_rug_buffers(const Cloth& cloth);
     void draw_item(Item& it, const RenderParams& p, float lift);
+    void ensure_texture(Item& it, const RenderParams& p);
+    void draw_rug_item(Item& it, const RenderParams& p, const Cloth& c, float bias);
     void quad(GLuint tex, float cx, float cy, float w, float h, float angle, float alpha,
               int mode, const float* color = nullptr);
 };

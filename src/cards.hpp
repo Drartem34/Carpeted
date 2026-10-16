@@ -11,7 +11,12 @@ enum class Kind { File, Image, Link, Text, Window };
 struct Item {
     std::string id;
     Kind kind = Kind::File;
-    float x = 0, y = 0, angle = 0;     // centre on the floor, logical px
+    // A card lies either on the rug - glued to rug point (u, v), in px of the
+    // flat rug, so it moves, bends and folds together with the rug - or on
+    // the floor at (x, y) (that is where things hidden under the rug are).
+    bool on_rug = false;
+    float u = 0, v = 0;
+    float x = 0, y = 0, angle = 0;     // floor position / screen position while dragged
     float w = 96, h = 100;
     bool automatic = false;            // appeared by itself (download, screenshot)
     double added = 0;                  // unix time

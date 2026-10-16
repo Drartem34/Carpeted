@@ -80,7 +80,14 @@ void Shelf::load() {
                float(j["rug"][2].number()), float(j["rug"][3].number())};
     for (auto& e : j["items"].arr) {
         auto it = std::make_unique<Item>();
-        if (Item::from_json(e, *it)) items.push_back(std::move(it));
+        if (!Item::from_json(e, *it)) continue;
+        Item* raw = it.get();
+        items.push_back(std::move(it));
+        if (!e.has("on_rug")) {           // saved by an older version: onto the rug
+            float u, v;
+            free_rug_spot(raw->w, raw->h, u, v);
+            put_on_rug(raw, u, v);
+        }
     }
 }
 
@@ -98,25 +105,40 @@ void Shelf::save() {
 }
 
 // ------------------------------------------------------------- placement
-void Shelf::free_spot(float w, float h, float& bx, float& by) {
+void Shelf::free_rug_spot(float w, float h, float& bu, float& bv) {
+    // a free place on the rug, away from the other cards lying on it
+    const float W = rug_w(), H = rug_h(), m = 6;
     float best = -1e9f;
-    bx = width / 2;
-    by = h / 2 + 10;
-    float rug_cy = (rug.y0 + rug.y1) / 2;
+    bu = W / 2;
+    bv = H / 2;
     for (int k = 0; k < 150; ++k) {
-        float x = uniform(w / 2 + 8, std::max(w / 2 + 9, width - w / 2 - 8));
-        float y = uniform(h / 2 + 8, std::max(h / 2 + 9, height - h / 2 - 8));
-        if (x > rug.x0 - w / 2 && x < rug.x1 + w / 2 && y > rug.y0 - h / 2 && y < rug.y1 + h / 2)
-            continue;   // not on the rug
+        float u = uniform(std::min(w / 2 + m, W / 2), std::max(W - w / 2 - m, W / 2 + 0.1f));
+        float v = uniform(std::min(h / 2 + m, H / 2), std::max(H - h / 2 - m, H / 2 + 0.1f));
         float nearest = 1e9f;
-        for (auto& it : items) nearest = std::min(nearest, std::hypot(x - it->x, y - it->y));
-        float score = std::min(nearest, 400.f) - 0.15f * std::fabs(y - rug_cy);
-        if (score > best) {
-            best = score;
-            bx = x;
-            by = y;
+        for (auto& it : items)
+            if (it->on_rug)
+                nearest = std::min(nearest, std::max(std::fabs(u - it->u) / (w + it->w) * 2,
+                                                     std::fabs(v - it->v) / (h + it->h) * 2));
+        if (nearest > best) {
+            best = nearest;
+            bu = u;
+            bv = v;
         }
     }
+}
+
+void Shelf::put_on_rug(Item* it, float u, float v) {
+    it->on_rug = true;
+    it->u = std::clamp(u, std::min(it->w / 2, rug_w() / 2), std::max(rug_w() - it->w / 2, rug_w() / 2));
+    it->v = std::clamp(v, std::min(it->h / 2, rug_h() / 2), std::max(rug_h() - it->h / 2, rug_h() / 2));
+    dirty = true;
+}
+
+void Shelf::put_on_floor(Item* it, float x, float y) {
+    it->on_rug = false;
+    it->x = std::clamp(x, it->w / 2, std::max(it->w / 2, width - it->w / 2));
+    it->y = std::clamp(y, it->h / 2, std::max(it->h / 2, height - it->h / 2));
+    dirty = true;
 }
 
 Item* Shelf::place(std::unique_ptr<Item> it, float x, float y) {
@@ -124,12 +146,17 @@ Item* Shelf::place(std::unique_ptr<Item> it, float x, float y) {
     it->added = double(std::time(nullptr));
     it->angle = uniform(-0.12f, 0.12f);
     it->set_size();
-    if (x == NAN_POS) free_spot(it->w, it->h, x, y);
-    it->x = x;
-    it->y = y;
+    Item* raw = it.get();
     items.push_back(std::move(it));
+    if (x == NAN_POS) {
+        float u, v;
+        free_rug_spot(raw->w, raw->h, u, v);
+        put_on_rug(raw, u, v);
+    } else {
+        put_on_floor(raw, x, y);   // the app moves it onto the rug if it landed there
+    }
     dirty = true;
-    return items.back().get();
+    return raw;
 }
 
 Item* Shelf::add_file(const std::string& path, float x, float y, bool automatic) {
@@ -218,8 +245,12 @@ void Shelf::raise(Item* item) {
 
 void Shelf::clamp() {
     for (auto& it : items) {
-        it->x = std::clamp(it->x, it->w / 2, std::max(it->w / 2, width - it->w / 2));
-        it->y = std::clamp(it->y, it->h / 2, std::max(it->h / 2, height - it->h / 2));
+        if (it->on_rug) {
+            put_on_rug(it.get(), it->u, it->v);
+        } else {
+            it->x = std::clamp(it->x, it->w / 2, std::max(it->w / 2, width - it->w / 2));
+            it->y = std::clamp(it->y, it->h / 2, std::max(it->h / 2, height - it->h / 2));
+        }
     }
 }
 

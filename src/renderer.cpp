@@ -94,6 +94,35 @@ void main() {
 }
 )";
 
+// A card lying on the rug: a small mesh draped over the cloth surface.
+const char* CARD_VS = R"(
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUv;
+layout(location = 2) in float aFacing;   // surface normal z under this vertex
+out vec2 vUv;
+out float vVis;
+void main() {
+    vUv = aUv;
+    // parts lying on a steep or turned-over bit of rug are not seen from above
+    vVis = smoothstep(0.25, 0.55, aFacing);
+    gl_Position = toClip(projectXY(aPos), -aPos.z / 2000.0);
+}
+)";
+
+const char* CARD_FS = R"(
+precision mediump float;
+in vec2 vUv;
+in float vVis;
+uniform sampler2D uTex;
+uniform vec4 uTint;        // premultiplied highlight, a = strength
+out vec4 fragColor;
+void main() {
+    vec4 c = texture(uTex, vUv) * vVis;
+    if (c.a < 0.04) discard;            // do not hide what lies under the empty parts
+    fragColor = vec4(mix(c.rgb, uTint.rgb * c.a, uTint.a), c.a);
+}
+)";
+
 const char* SHADOW_VS = R"(
 layout(location = 0) in vec3 aPos;
 uniform vec2 uShadowDir;
@@ -176,7 +205,34 @@ bool Renderer::init(const Cloth& cloth) {
     quad_prog_ = compile(QUAD_VS, QUAD_FS);
     rug_prog_ = compile(RUG_VS, RUG_FS);
     shadow_prog_ = compile(SHADOW_VS, SHADOW_FS);
-    if (!quad_prog_ || !rug_prog_ || !shadow_prog_) return false;
+    card_prog_ = compile(CARD_VS, CARD_FS);
+    if (!quad_prog_ || !rug_prog_ || !shadow_prog_ || !card_prog_) return false;
+
+    // one 5x5 grid mesh, refilled for every card on the rug
+    glGenVertexArrays(1, &card_vao_);
+    glBindVertexArray(card_vao_);
+    glGenBuffers(1, &card_vbo_);
+    glBindBuffer(GL_ARRAY_BUFFER, card_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, 25 * 6 * sizeof(float), nullptr, GL_STREAM_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                          reinterpret_cast<void*>(3 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                          reinterpret_cast<void*>(5 * sizeof(float)));
+    std::vector<uint16_t> idx;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+            uint16_t a = i * 5 + j, b = a + 1, c = a + 5, d = c + 1;
+            idx.insert(idx.end(), {a, c, b, b, c, d});
+        }
+    glGenBuffers(1, &card_ibo_);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, card_ibo_);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(uint16_t), idx.data(),
+                 GL_STATIC_DRAW);
+    glBindVertexArray(0);
 
     const float corners[] = {0, 0, 1, 0, 0, 1, 1, 1};
     glGenVertexArrays(1, &quad_vao_);
@@ -235,10 +291,11 @@ void Renderer::forget(Item& it) {
 
 void Renderer::destroy(std::vector<std::unique_ptr<Item>>& items) {
     for (auto& it : items) forget(*it);
-    GLuint bufs[] = {quad_vbo_, rug_vbo_, uv_vbo_, ibo_};
-    glDeleteBuffers(4, bufs);
-    GLuint vaos[] = {quad_vao_, rug_vao_};
-    glDeleteVertexArrays(2, vaos);
+    GLuint bufs[] = {quad_vbo_, rug_vbo_, uv_vbo_, ibo_, card_vbo_, card_ibo_};
+    glDeleteBuffers(6, bufs);
+    GLuint vaos[] = {quad_vao_, rug_vao_, card_vao_};
+    glDeleteVertexArrays(3, vaos);
+    glDeleteProgram(card_prog_);
     glDeleteTextures(1, &rug_tex_);
     glDeleteProgram(quad_prog_);
     glDeleteProgram(rug_prog_);
@@ -258,7 +315,7 @@ void Renderer::quad(GLuint tex, float cx, float cy, float w, float h, float angl
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
-void Renderer::draw_item(Item& it, const RenderParams& p, float lift) {
+void Renderer::ensure_texture(Item& it, const RenderParams& p) {
     if (!it.texture || it.texture_scale != p.scale) {
         CardImage img = render_card(it, p.scale);
         bgra_to_rgba(img);
@@ -268,6 +325,37 @@ void Renderer::draw_item(Item& it, const RenderParams& p, float lift) {
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         it.texture_scale = p.scale;
     }
+}
+
+void Renderer::draw_rug_item(Item& it, const RenderParams& p, const Cloth& c, float bias) {
+    float verts[25 * 6];
+    float ca = std::cos(it.angle), sa = std::sin(it.angle);
+    for (int i = 0; i < 5; ++i)
+        for (int j = 0; j < 5; ++j) {
+            float lx = (j / 4.f - 0.5f) * it.w, ly = (i / 4.f - 0.5f) * it.h;
+            V3 pos, n;
+            c.sample(it.u + ca * lx - sa * ly, it.v + sa * lx + ca * ly, pos, n);
+            // still inside the roll: wait until this part of the rug is out
+            if (p.animating && (pos.z > 1.5f || n.z < 0.9f)) return;
+            float* v = &verts[(i * 5 + j) * 6];
+            v[0] = pos.x + n.x * bias;
+            v[1] = pos.y + n.y * bias;
+            v[2] = pos.z + n.z * bias;
+            v[3] = j / 4.f;
+            v[4] = i / 4.f;
+            v[5] = n.z;
+        }
+    ensure_texture(it, p);
+    glBindBuffer(GL_ARRAY_BUFFER, card_vbo_);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof verts, verts);
+    float sel = &it == p.selected ? 0.3f : 0.f;
+    glUniform4f(glGetUniformLocation(card_prog_, "uTint"), 0.3f, 0.5f, 1.f, sel);
+    glBindTexture(GL_TEXTURE_2D, it.texture);
+    glDrawElements(GL_TRIANGLES, 96, GL_UNSIGNED_SHORT, nullptr);
+}
+
+void Renderer::draw_item(Item& it, const RenderParams& p, float lift) {
+    ensure_texture(it, p);
     float x = it.x, y = it.y;
     if (&it == p.selected) {
         const float c[] = {0.2f * 0.4f, 0.35f * 0.4f, 0.65f * 0.4f, 0.4f};
@@ -305,7 +393,7 @@ void Renderer::render(const RenderParams& p, const Cloth& c,
     glBindVertexArray(quad_vao_);
     if (p.shade_floor) quad(0, p.view_w / 2, p.view_h / 2, p.view_w, p.view_h, 0, 1, 2);
     for (auto& it : items)
-        if (it.get() != p.carried && it.get() != p.hidden) draw_item(*it, p, 0);
+        if (!it->on_rug && it.get() != p.carried && it.get() != p.hidden) draw_item(*it, p, 0);
 
     // the rug: shadow first, then the cloth with depth testing
     scratch_.resize(size_t(c.count()) * 6);
@@ -331,6 +419,17 @@ void Renderer::render(const RenderParams& p, const Cloth& c,
     glUniform1i(glGetUniformLocation(rug_prog_, "uTex"), 0);
     glBindTexture(GL_TEXTURE_2D, rug_tex_);
     glDrawElements(GL_TRIANGLES, index_count_, GL_UNSIGNED_SHORT, nullptr);
+
+    // cards lying on the rug, depth tested so a folded flap covers them
+    common(card_prog_);
+    glUniform1i(glGetUniformLocation(card_prog_, "uTex"), 0);
+    glBindVertexArray(card_vao_);
+    float bias = 0.8f;
+    for (auto& it : items) {
+        if (!it->on_rug || it.get() == p.carried || it.get() == p.hidden) continue;
+        draw_rug_item(*it, p, c, bias);
+        bias += 0.03f;          // later cards lie on top of earlier ones
+    }
     glDisable(GL_DEPTH_TEST);
 
     // a window card being carried floats above everything

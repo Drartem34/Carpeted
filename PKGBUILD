@@ -1,6 +1,6 @@
 # Build and install on Arch:  makepkg -si   (run in this folder)
 pkgname=carpeted
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="A rug with real cloth physics that rolls out from the bottom of the screen; hide files, links and windows under it"
 arch=('x86_64' 'aarch64')

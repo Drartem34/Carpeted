@@ -34,7 +34,7 @@ int Daemon::run(int listen_fd, const std::string& first, const volatile sig_atom
                 shelf_.drain_watch();             // the rug process watches itself
             } else if (shelf_.handle_watch([this](const Item& it) {
                            const Rect& r = shelf_.rug;     // it comes back flat
-                           return it.x > r.x0 && it.x < r.x1 && it.y > r.y0 && it.y < r.y1;
+                           return !it.on_rug && it.x > r.x0 && it.x < r.x1 && it.y > r.y0 && it.y < r.y1;
                        })) {
                 shelf_.save();
             }

@@ -50,6 +50,7 @@ Config Config::load() {
         else if (k == "focal") c.focal = std::max(200.f, f());
         else if (k == "unroll_time") c.unroll_time = f();
         else if (k == "roll_time") c.roll_time = f();
+        else if (k == "relax_delay") c.relax_delay = std::max(0.f, f());
         else if (k == "shade") c.shade = v == "true" || v == "1" || v == "yes";
         else if (k == "recent_limit") c.shelf.recent_limit = int(f());
         else if (k == "watch") {
@@ -76,7 +77,7 @@ App::~App() {
 }
 
 bool App::busy() const {
-    return anim_ || dirty_ || grab_ >= 0 || carry_ ||
+    return anim_ || dirty_ || grab_ >= 0 || carry_ || relax_active_ ||
            (state_ == State::Open && cloth_ && !cloth_->sleeping());
 }
 
@@ -99,9 +100,11 @@ int App::run(int cmd_fd, const volatile sig_atomic_t* stop) {
         for (int p : pipes) fds.push_back({p, POLLIN, 0});
 
         while (!wl_.prepare_read()) wl_.dispatch_pending();
-        int n = poll(fds.data(), fds.size(), -1);   // sleeps until something happens
+        // sleeps until something happens (or the rug should tidy itself up)
+        int n = poll(fds.data(), fds.size(), timer_ms());
         wl_.read_events(n > 0 && (fds[0].revents & POLLIN));
         wl_.dispatch_pending();
+        if (timer_ms() == 0) on_timer();
         if (n <= 0) continue;
 
         if (fds[1].revents & (POLLIN | POLLHUP)) {
@@ -357,6 +360,8 @@ void App::simulate() {
             float tx = std::clamp(cx + (mx_ - cx) / s, 0.f, float(scene_w_));
             float ty = std::clamp(cy + (my_ - cy) / s, 0.f, float(scene_h_) - 4);
             cloth_->pin(grab_, {tx, ty, grab_z_});
+        } else if (relax_active_) {
+            step_relax();
         }
         cloth_->step(float(STEP));
         accum_ -= STEP;
@@ -370,7 +375,7 @@ void App::update_obstacles() {
     if (!cloth_) return;
     std::vector<Rect> rects;
     for (auto& it : shelf_.items) {
-        if (it.get() == carry_ || it.get() == dnd_item_) continue;
+        if (it->on_rug || it.get() == carry_ || it.get() == dnd_item_) continue;
         float x0 = it->x - it->w / 2, y0 = it->y - it->h / 2;
         float x1 = it->x + it->w / 2, y1 = it->y + it->h / 2;
         if (it->kind == Kind::File) {       // the icon, not its label
@@ -403,7 +408,8 @@ void App::on_frame(uint32_t) {
     frame_pending_ = false;
     if (state_ == State::Hidden) return;
     if (anim_) step_anim();
-    else if (state_ == State::Open && (grab_ >= 0 || !cloth_->sleeping())) simulate();
+    else if (state_ == State::Open && (grab_ >= 0 || relax_active_ || !cloth_->sleeping()))
+        simulate();
     if (state_ == State::Hidden) return;       // the roll-up just finished
     if (busy()) draw();
     else if (shelf_.dirty) shelf_.save();     // gone quiet: a good moment to save
@@ -422,6 +428,7 @@ void App::draw() {
     p.selected = selected_;
     p.carried = carry_;
     p.hidden = dnd_item_;
+    p.animating = anim_;
     renderer_.render(p, *cloth_, shelf_.items);
     wl_.request_frame();                  // tells us when the next frame is due
     frame_pending_ = true;
@@ -429,8 +436,9 @@ void App::draw() {
 }
 
 // ----------------------------------------------------------------- picking
-int App::pick_rug(float x, float y) const {
-    if (!cloth_ || state_ != State::Open) return -1;
+App::RugHit App::pick_rug_hit(float x, float y) const {
+    RugHit hit;
+    if (!cloth_ || state_ != State::Open) return hit;
     const Cloth& c = *cloth_;
     float cx = scene_w_ / 2.f, cy = scene_h_ / 2.f;
     auto proj = [&](int k, float& sx, float& sy) {
@@ -438,7 +446,6 @@ int App::pick_rug(float x, float y) const {
         sx = cx + (c.pos[k].x - cx) * s;
         sy = cy + (c.pos[k].y - cy) * s;
     };
-    int best = -1;
     float best_z = -1e9f;
     for (size_t t = 0; t + 2 < c.triangles.size(); t += 3) {
         int a = c.triangles[t], b = c.triangles[t + 1], d = c.triangles[t + 2];
@@ -446,22 +453,96 @@ int App::pick_rug(float x, float y) const {
         proj(a, ax, ay);
         proj(b, bx, by);
         proj(d, dx, dy);
-        float c1 = (bx - ax) * (y - ay) - (by - ay) * (x - ax);
-        float c2 = (dx - bx) * (y - by) - (dy - by) * (x - bx);
-        float c3 = (ax - dx) * (y - dy) - (ay - dy) * (x - dx);
-        bool inside = (c1 >= 0 && c2 >= 0 && c3 >= 0) || (c1 <= 0 && c2 <= 0 && c3 <= 0);
-        if (!inside) continue;
-        float z = (c.pos[a].z + c.pos[b].z + c.pos[d].z) / 3;
+        float area = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax);
+        if (std::fabs(area) < 1e-6f) continue;
+        // barycentric coordinates of (x, y)
+        float wb = ((x - ax) * (dy - ay) - (y - ay) * (dx - ax)) / area;
+        float wd = ((bx - ax) * (y - ay) - (by - ay) * (x - ax)) / area;
+        float wa = 1 - wb - wd;
+        if (wa < -1e-4f || wb < -1e-4f || wd < -1e-4f) continue;
+        float z = wa * c.pos[a].z + wb * c.pos[b].z + wd * c.pos[d].z;
         if (z <= best_z) continue;
         best_z = z;
+        hit.z = z;
+        hit.u = (wa * c.uv[2 * a] + wb * c.uv[2 * b] + wd * c.uv[2 * d]) * c.width;
+        hit.v = (wa * c.uv[2 * a + 1] + wb * c.uv[2 * b + 1] + wd * c.uv[2 * d + 1]) * c.height;
+        hit.nz = wa * c.normals[a].z + wb * c.normals[b].z + wd * c.normals[d].z;
         float da = std::hypot(ax - x, ay - y), db = std::hypot(bx - x, by - y),
               dd = std::hypot(dx - x, dy - y);
-        best = da <= db && da <= dd ? a : (db <= dd ? b : d);
+        hit.particle = da <= db && da <= dd ? a : (db <= dd ? b : d);
+    }
+    return hit;
+}
+
+bool App::card_screen(const Item& it, float& sx, float& sy, float& z) const {
+    if (!it.on_rug) {
+        sx = it.x;
+        sy = it.y;
+        z = 0;
+        return true;
+    }
+    if (!cloth_) return false;
+    V3 p, n;
+    cloth_->sample(it.u, it.v, p, n);
+    float s = cfg_.focal / std::max(cfg_.focal - p.z, 1.f);
+    sx = scene_w_ / 2.f + (p.x - scene_w_ / 2.f) * s;
+    sy = scene_h_ / 2.f + (p.y - scene_h_ / 2.f) * s;
+    z = p.z + 0.8f * n.z;
+    return true;
+}
+
+Item* App::card_at(float x, float y) const {
+    if (state_ != State::Open || !cloth_) return nullptr;
+    RugHit rug = pick_rug_hit(x, y);
+    Item* best = nullptr;
+    float best_z = -1e9f;
+    for (auto& ptr : shelf_.items) {
+        Item& it = *ptr;
+        if (&it == dnd_item_ || &it == carry_) continue;
+        float z = 0;
+        bool inside;
+        if (!it.on_rug) {
+            inside = it.contains(x, y);
+        } else {
+            // card axes on screen, from its centre and two edge midpoints
+            auto screen = [&](float lx, float ly, float& sx, float& sy, float& sz) {
+                float ca = std::cos(it.angle), sa = std::sin(it.angle);
+                V3 p, n;
+                cloth_->sample(it.u + ca * lx - sa * ly, it.v + sa * lx + ca * ly, p, n);
+                float s = cfg_.focal / std::max(cfg_.focal - p.z, 1.f);
+                sx = scene_w_ / 2.f + (p.x - scene_w_ / 2.f) * s;
+                sy = scene_h_ / 2.f + (p.y - scene_h_ / 2.f) * s;
+                sz = p.z + 0.8f * n.z;
+            };
+            float cx, cy, ax, ay, bx, by, t;
+            screen(0, 0, cx, cy, z);
+            screen(it.w / 2, 0, ax, ay, t);
+            screen(0, it.h / 2, bx, by, t);
+            float Ax = ax - cx, Ay = ay - cy, Bx = bx - cx, By = by - cy;
+            float det = Ax * By - Ay * Bx;
+            if (std::fabs(det) < 1e-3f) continue;
+            float px = x - cx, py = y - cy;
+            float a = (px * By - py * Bx) / det, b = (Ax * py - Ay * px) / det;
+            inside = std::fabs(a) <= 1 && std::fabs(b) <= 1;
+        }
+        if (!inside) continue;
+        if (rug.particle >= 0 && rug.z > z + 0.5f) continue;    // the rug lies over it
+        if (z >= best_z) {
+            best_z = z;
+            best = &it;
+        }
     }
     return best;
 }
 
+void App::place_at(Item* it, float x, float y) {
+    RugHit hit = pick_rug_hit(x, y);
+    if (hit.particle >= 0 && hit.nz > 0.3f) shelf_.put_on_rug(it, hit.u, hit.v);
+    else shelf_.put_on_floor(it, x, y);
+}
+
 bool App::under_rug(const Item& it) const {
+    if (it.on_rug) return false;
     if (state_ == State::Open) return covered(it.x, it.y);
     const Rect& r = shelf_.rug;       // rolled up: it comes back flat
     return it.x > r.x0 && it.x < r.x1 && it.y > r.y0 && it.y < r.y1;
@@ -486,8 +567,8 @@ void App::on_pointer_motion(float x, float y) {
         return;
     }
     if (grab_ < 0 && !left_down_)
-        wl_.set_cursor(covered(x, y) ? Cursor::Grab
-                                     : shelf_.item_at(x, y) ? Cursor::Pointer : Cursor::Default);
+        wl_.set_cursor(card_at(x, y) ? Cursor::Pointer
+                                     : covered(x, y) ? Cursor::Grab : Cursor::Default);
 }
 
 void App::on_pointer_leave() {
@@ -520,7 +601,13 @@ void App::on_pointer_button(uint32_t button, bool pressed) {
 void App::press(float x, float y) {
     press_x_ = x;
     press_y_ = y;
-    int hit = pick_rug(x, y);
+    last_touch_ms_ = util::now_ms();
+    if (relax_active_) {              // the user takes over from the invisible hand
+        relax_active_ = false;
+        cloth_->unpin();
+    }
+    Item* it = card_at(x, y);
+    int hit = it ? -1 : pick_rug(x, y);
     if (hit >= 0) {
         grab_ = hit;
         grab_z_ = cloth_->pos[hit].z;
@@ -529,11 +616,14 @@ void App::press(float x, float y) {
         redraw();
         return;
     }
-    Item* it = shelf_.item_at(x, y);
     selected_ = it;
     if (it) {
         shelf_.raise(it);
         if (it->kind == Kind::Window) {
+            float sx, sy, z;
+            card_screen(*it, sx, sy, z);
+            it->x = sx;                       // carried in screen space
+            it->y = sy;
             carry_ = it;
             carry_dx_ = it->x - x;
             carry_dy_ = it->y - y;
@@ -552,6 +642,8 @@ void App::release() {
         cloth_->unpin();
         wl_.set_cursor(Cursor::Grab);
         last_step_ms_ = util::now_ms();
+        last_touch_ms_ = util::now_ms();
+        relax_pending_ = true;
         redraw();
     }
     if (carry_) {
@@ -560,8 +652,7 @@ void App::release() {
         if (my_ < -8 || mx_ < -8 || mx_ > scene_w_ + 8) {   // dragged off the floor
             restore_window(it);
         } else {
-            shelf_.clamp();
-            shelf_.dirty = true;
+            place_at(it, it->x, it->y);
         }
         update_obstacles();
         redraw();
@@ -569,11 +660,11 @@ void App::release() {
 }
 
 void App::click(uint32_t button, float x, float y, bool dbl) {
-    if (covered(x, y)) {
+    Item* it = card_at(x, y);
+    if (!it && covered(x, y)) {
         if (button == BTN_LEFT && dbl) shake();
         return;
     }
-    Item* it = shelf_.item_at(x, y);
     if (!it) {
         selected_ = nullptr;
         redraw();
@@ -633,10 +724,12 @@ void App::begin_drag_out(Item* it) {
     }
     int icon_scale = std::max(1, int(std::ceil(wl_.scale())));
     CardImage icon = render_card(*it, float(icon_scale));
+    float sx, sy, z;
+    card_screen(*it, sx, sy, z);
     dnd_item_ = it;
-    dnd_dx_ = it->x - press_x_;
-    dnd_dy_ = it->y - press_y_;
-    int hot_x = int(press_x_ - (it->x - it->w / 2)), hot_y = int(press_y_ - (it->y - it->h / 2));
+    dnd_dx_ = sx - press_x_;
+    dnd_dy_ = sy - press_y_;
+    int hot_x = int(press_x_ - (sx - it->w / 2)), hot_y = int(press_y_ - (sy - it->h / 2));
     wl_.start_drag(offers, icon, hot_x, hot_y, icon_scale);
     left_down_ = false;               // the compositor owns the pointer now
     update_obstacles();
@@ -654,10 +747,7 @@ void App::on_dnd_leave() {}
 
 void App::on_internal_drop(float x, float y) {
     if (!dnd_item_) return;
-    dnd_item_->x = x + dnd_dx_;
-    dnd_item_->y = y + dnd_dy_;
-    shelf_.clamp();
-    shelf_.dirty = true;
+    place_at(dnd_item_, x + dnd_dx_, y + dnd_dy_);
     update_obstacles();
     redraw();
 }
@@ -677,23 +767,24 @@ void App::add_from_data(const std::string& mime, const std::string& data, float 
             float px = x + added * 16, py = y + added * 12;
             std::string path = util::uri_to_path(line);
             if (!path.empty()) {
-                if (Item* old = shelf_.find_path(path)) {
-                    old->x = px;
-                    old->y = py;
-                } else {
-                    shelf_.add_file(path, px, py);
-                }
+                Item* it = shelf_.find_path(path);
+                if (!it) it = shelf_.add_file(path, px, py);
+                place_at(it, px, py);
             } else {
-                shelf_.add_link(line, px, py);
+                place_at(shelf_.add_link(line, px, py), px, py);
             }
             ++added;
         }
     } else if (mime.rfind("image/", 0) == 0) {
         std::string ext = mime.substr(6);
         if (ext == "jpeg") ext = "jpg";
-        added = shelf_.add_image_bytes(data, ext, x, y) != nullptr;
+        Item* it = shelf_.add_image_bytes(data, ext, x, y);
+        if (it) place_at(it, x, y);
+        added = it != nullptr;
     } else {
-        added = shelf_.add_text(data, x, y) != nullptr;
+        Item* it = shelf_.add_text(data, x, y);
+        if (it) place_at(it, x, y);
+        added = it != nullptr;
     }
     if (!added) return;
     shelf_.clamp();
@@ -710,4 +801,47 @@ void App::restore_window(Item* it) {
     shelf_.remove(it);
     forget_removed();
     redraw();
+}
+
+// --------------------------------------------------- straightening itself
+int App::timer_ms() const {
+    if (!relax_pending_ || relax_active_ || cfg_.relax_delay <= 0 || state_ != State::Open ||
+        !cloth_ || grab_ >= 0 || carry_ || left_down_ || !cloth_->sleeping())
+        return -1;
+    int64_t due = last_touch_ms_ + int64_t(cfg_.relax_delay * 1000);
+    return int(std::max<int64_t>(0, due - util::now_ms()));
+}
+
+void App::on_timer() {
+    std::vector<V3> target;
+    cloth_->flat_target(target);
+    int worst = -1;
+    float dev = cloth_->deviation(target, worst);
+    if (dev < 12 || worst < 0) {          // flat enough: nothing to do
+        relax_pending_ = false;
+        return;
+    }
+    relax_active_ = true;
+    relax_k_ = worst;
+    relax_from_ = cloth_->pos[worst];
+    relax_to_ = target[worst];
+    float dist = std::hypot(relax_to_.x - relax_from_.x, relax_to_.y - relax_from_.y);
+    relax_dur_ = std::clamp(dist / 160.f, 1.2f, 4.f);      // slowly, a bit at a time
+    relax_lift_ = std::min(70.f, 25 + dist * 0.25f);
+    relax_t0_ = util::now_ms();
+    last_step_ms_ = relax_t0_;
+    redraw();
+}
+
+void App::step_relax() {
+    float t = (util::now_ms() - relax_t0_) / 1000.f;
+    float s = std::min(1.f, t / relax_dur_), e = s * s * (3 - 2 * s);
+    V3 a = relax_from_, b = relax_to_;
+    cloth_->pin(relax_k_, {a.x + (b.x - a.x) * e, a.y + (b.y - a.y) * e,
+                           a.z + (b.z - a.z) * e + relax_lift_ * std::sin(float(M_PI) * e)});
+    if (t > relax_dur_ + 0.5f) {          // laid down: let go, look again later
+        relax_active_ = false;
+        cloth_->unpin();
+        last_touch_ms_ = util::now_ms() - int64_t(cfg_.relax_delay * 1000) + 1500;
+    }
 }

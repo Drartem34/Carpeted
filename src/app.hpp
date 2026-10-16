@@ -22,6 +22,7 @@ struct Config {
     float focal = 1800;
     float unroll_time = 0.9f, roll_time = 0.55f;
     bool shade = true;                // dark see-through band behind the floor
+    float relax_delay = 4;            // s of quiet before the rug straightens itself (0: never)
     ShelfConfig shelf;
     bool debug = false;               // accept debug-* commands (tests)
 
@@ -108,8 +109,17 @@ private:
     void update_obstacles();
     void forget_removed();
 
-    int pick_rug(float x, float y) const;
+    struct RugHit {
+        int particle = -1;
+        float z = 0, u = 0, v = 0, nz = 1;
+    };
+    RugHit pick_rug_hit(float x, float y) const;
+    int pick_rug(float x, float y) const { return pick_rug_hit(x, y).particle; }
     bool covered(float x, float y) const { return pick_rug(x, y) >= 0; }
+    // the card under the cursor, if the rug does not cover it
+    Item* card_at(float x, float y) const;
+    bool card_screen(const Item& it, float& sx, float& sy, float& z) const;
+    void place_at(Item* it, float x, float y);   // on the rug if it landed on it
     bool under_rug(const Item& it) const;
     void press(float x, float y);
     void release();
@@ -117,4 +127,15 @@ private:
     void begin_drag_out(Item* it);
     void restore_window(Item* it);
     void add_from_data(const std::string& mime, const std::string& data, float x, float y);
+
+    // the rug straightening itself: an invisible hand slowly folds back the
+    // part that is furthest from lying flat
+    bool relax_pending_ = false, relax_active_ = false;
+    int relax_k_ = -1;
+    V3 relax_from_, relax_to_;
+    int64_t relax_t0_ = 0, last_touch_ms_ = 0;
+    float relax_dur_ = 0, relax_lift_ = 0;
+    int timer_ms() const;                 // poll timeout until the next relax check
+    void on_timer();
+    void step_relax();
 };

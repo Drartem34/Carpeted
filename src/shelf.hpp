@@ -23,6 +23,8 @@ public:
     std::vector<std::unique_ptr<Item>> removed;   // waiting for GL cleanup
     float width = 1280, height = 400;            // floor size
     Rect rug{0, 0, 0, 0};                        // where the flat rug lies
+    float rug_w() const { return rug.x1 - rug.x0 > 1 ? rug.x1 - rug.x0 : 900; }
+    float rug_h() const { return rug.y1 - rug.y0 > 1 ? rug.y1 - rug.y0 : 300; }
 
     void load();
     void save();
@@ -47,7 +49,9 @@ public:
     bool handle_watch(const std::function<bool(const Item&)>& hidden);
     void drain_watch();      // read and ignore pending events
 
-    static constexpr float NAN_POS = -1e9f;   // "find me a free spot"
+    static constexpr float NAN_POS = -1e9f;   // "find me a free spot on the rug"
+    void put_on_rug(Item* it, float u, float v);
+    void put_on_floor(Item* it, float x, float y);
 
 private:
     ShelfConfig cfg_;
@@ -59,6 +63,6 @@ private:
     };
     std::vector<Watch> watches_;
     Item* place(std::unique_ptr<Item> item, float x, float y);
-    void free_spot(float w, float h, float& x, float& y);
+    void free_rug_spot(float w, float h, float& u, float& v);
     void trim(const std::function<bool(const Item&)>& hidden);
 };

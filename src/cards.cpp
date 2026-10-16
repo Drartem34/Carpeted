@@ -66,6 +66,9 @@ Json Item::to_json() const {
     };
     j.obj["id"] = Json::of(id);
     j.obj["kind"] = Json::of(std::string(kind_name(kind)));
+    j.obj["on_rug"] = Json::of(on_rug);
+    j.obj["u"] = Json::of(std::round(u * 10) / 10.0);
+    j.obj["v"] = Json::of(std::round(v * 10) / 10.0);
     j.obj["x"] = Json::of(std::round(x * 10) / 10.0);
     j.obj["y"] = Json::of(std::round(y * 10) / 10.0);
     j.obj["angle"] = Json::of(std::round(angle * 1000) / 1000.0);
@@ -85,6 +88,9 @@ Json Item::to_json() const {
 bool Item::from_json(const Json& j, Item& it) {
     if (!kind_from(j["kind"].string(), it.kind)) return false;
     it.id = j["id"].string(util::random_id());
+    it.on_rug = j["on_rug"].boolean();
+    it.u = j["u"].number();
+    it.v = j["v"].number();
     it.x = j["x"].number();
     it.y = j["y"].number();
     it.angle = j["angle"].number();

@@ -13,6 +13,7 @@ focal = 1800             # perspective (smaller = stronger)
 unroll_time = 0.9
 roll_time = 0.55
 shade = true             # dark see-through band behind the floor
+relax_delay = 4          # seconds of quiet before the rug straightens itself (0 = never)
 
 watch = downloads, screenshots     # or extra folders: ~/Inbox, /tmp/drop
 recent_limit = 30                  # how many automatic cards may lie around

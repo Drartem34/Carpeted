@@ -1,5 +1,5 @@
 project('carpeted', ['c', 'cpp'],
-  version : '0.2.0',
+  version : '0.3.0',
   license : 'MIT',
   default_options : ['cpp_std=c++20', 'buildtype=release', 'warning_level=2',
                      'b_ndebug=if-release'])
