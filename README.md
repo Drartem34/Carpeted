@@ -56,6 +56,17 @@ wlroots-композитора). Натискаєш `SUPER+R` — знизу е�
 
 ## Встановлення (Arch)
 
+З архіву `carpeted-0.2.0.tar.gz`:
+
+```sh
+sudo pacman -S --needed base-devel
+tar xf carpeted-0.2.0.tar.gz
+cd carpeted-0.2.0
+makepkg -si          # збере, прожене тести і встановить пакет carpeted
+```
+
+Або вручну з git:
+
 ```sh
 sudo pacman -S --needed base-devel meson ninja wayland wayland-protocols \
     mesa libxkbcommon cairo pango gdk-pixbuf2 grim
